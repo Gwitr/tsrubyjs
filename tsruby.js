@@ -53,18 +53,96 @@ class NoType extends Error {
 class NoMethodError extends Error {
     constructor(message) {
         super();
-        this.name = "NoMethodError";
+        this.name = "[Ruby] NoMethodError";
+        this.message = message;
+    }
+}
+
+class RubyNameError extends Error {
+    constructor(message) {
+        super();
+        this.name = "[Ruby] NameError";
         this.message = message;
     }
 }
 
 class RubyEnviroment {
-    constructor(rlocals, rconsts, rglobals, block) {
+    constructor(rlocals, rglobals, block) {
         this.rlocals = rlocals;
         this.rglobals = rglobals;
-        this.rconsts = rconsts;
         this.block = block;
+        this.object_stack = [];
         this.nil_singleton = NilClass.methods("new")(this);
+    }
+    
+    push_empty_object(name="main") {
+        let obj = ObjectClass.methods("new")(env);
+        obj.name = name;
+        this.object_stack.push(obj);
+    }
+    
+    getconst(name) {
+        for (let i = this.object_stack.length - 1; i >= 0; i--) {
+            let const_f = this.object_stack[i].consts[name];
+            if (const_f !== undefined)
+                return const_f;
+        }
+        throw new RubyNameError("Uninitialized constant " + name);
+    }
+    
+    setconst(name, value) {
+        let consts = this.object_stack[this.object_stack.length - 1].consts;
+        if (consts[name] !== undefined) {
+            // TODO: Throw warning instead of error
+            throw new RubyNameError("Constant " + name + " already initialized.");
+        }
+        if (value instanceof Function)
+            consts[name] = value;
+        else
+            consts[name] = function(env) { return value };
+    }
+    
+    getivar(name) {
+        for (let i = this.object_stack.length - 1; i >= 0; i--) {
+            let ivar = this.object_stack[i].ivars[name];
+            if (ivar !== undefined)
+                return ivar;
+        }
+        return _T(this, null);
+    }
+    
+    setivar(name, value) {
+        let ivars = this.object_stack[this.object_stack.length - 1].ivars;
+        ivars[name] = value;
+    }
+    
+    augment_class(container, name, base, f) {
+        if (base === null) {
+            base = BaseClass;
+        }
+        if (container.hasOwnProperty(name)) {
+            this.object_stack.push(container[name]);
+        } else {
+            this.object_stack.push(base.subclass(name));
+        }
+        let class_locals = f(this);
+        let rclass = this.object_stack.pop();
+        for (let obj_getter_name in class_locals) {
+            if (obj_getter_name in this.rlocals[0])
+                continue;
+            let obj_getter = class_locals[obj_getter_name];
+            
+            // FIXME: Don't add local variables into the class' instance methods [!!!]
+            if (!rclass.public_methods.hasOwnProperty(obj_getter)) {
+                if (!rclass.private_methods.hasOwnProperty(obj_getter)) {
+                    if (!rclass.protected_methods.hasOwnProperty(obj_getter)) {
+                        rclass.public_imethods[obj_getter_name] = obj_getter;
+                    }
+                }
+            }
+        }
+        // This might be incorrect
+        container[name] = function() { return rclass };
     }
 }
 
@@ -89,13 +167,35 @@ class RubyObject {
             this.public_methods = this.type.collect_public_imethods();
             this.private_methods = this.type.collect_private_imethods();
             this.protected_methods = this.type.collect_protected_imethods();
+            
+            for (let method in this.public_methods) {
+                if (this.public_methods.hasOwnProperty(method)) {
+                    this.public_methods[method].bound_to = this;
+                }
+            }
+            for (let method in this.protected_methods) {
+                if (this.protected_methods.hasOwnProperty(method)) {
+                    this.protected_methods[method].bound_to = this;
+                }
+            }
+            for (let method in this.private_methods) {
+                if (this.private_methods.hasOwnProperty(method)) {
+                    this.private_methods[method].bound_to = this;
+                }
+            }
         }
         
         this.ivars = {};
+        this.constants = {};
         
         if (this.type === undefined) {
             this.name = "BasicObject";
         } else {
+            /* 
+            // wtf why is there a mysterious int with no value appearing???
+            if (this.type.name === "Integer")
+                debugger; 
+            */
             this.name = this.type.name;
         }
         
@@ -110,17 +210,41 @@ class RubyObject {
         }
         if (name in this.public_methods) {
             return (env, ...args) => {
-                return this.public_methods[name].call(ctx, env, ...args)
+                let f = this.public_methods[name];
+                if (f.bound_to !== undefined) {
+                    env.object_stack.push(f.bound_to);
+                }
+                let result = f.call(ctx, env, ...args);
+                if (f.bound_to !== undefined) {
+                    env.object_stack.pop();
+                }
+                return result;
             };
         }
         if ((name in this.protected_methods) && this.allow_protected_access) {
             return (env, ...args) => {
-                return this.protected_methods[name].call(ctx, env, ...args)
+                let f = this.protected_methods[name];
+                if (f.bound_to !== undefined) {
+                    env.object_stack.push(f.bound_to);
+                }
+                let result = f.call(ctx, env, ...args);
+                if (f.bound_to !== undefined) {
+                    env.object_stack.pop();
+                }
+                return result;
             };
         }
         if ((name in this.private_methods) && this.allow_private_access) {
             return (env, ...args) => {
-                return this.private_methods[name].call(ctx, env, ...args)
+                let f = this.private_methods[name];
+                if (f.bound_to !== undefined) {
+                    env.object_stack.push(f.bound_to);
+                }
+                let result = f.call(ctx, env, ...args);
+                if (f.bound_to !== undefined) {
+                    env.object_stack.pop();
+                }
+                return result;
             };
         }
         try {
@@ -210,7 +334,14 @@ class RubyClass extends RubyObject {
         let res = {};
         let cr = this;
         while (1) {
-            res = {...cr[n], ...res};
+            let collection = cr[n];
+            let collection_new = {};
+            for (let oname in collection) {
+                if (collection.hasOwnProperty(oname)) {
+                    collection_new[oname] = function(...args) { return collection[oname].call(this, ...args) };
+                }
+            }
+            res = {...collection_new, ...res};
             cr = cr.get_base();
             if (cr === null) {
                 break;
@@ -307,6 +438,7 @@ ObjectClass.public_imethods = {
 var IntegerClass = ObjectClass.subclass("Integer");
 IntegerClass.public_imethods = {
     "initialize": function(env, ...args) {
+        // console.log(this);
         if (args[0] instanceof RubyObject) {
             if (args[0].type === IntegerClass) {
                 args[0] = args[0].i;
@@ -333,13 +465,13 @@ IntegerClass.public_imethods = {
     },
     
     ">": function(env, other) {
-        return this.i > (IntegerClass.methods("new")(env, "new")(other).i);
+        return this.i > (IntegerClass.methods("new")(env, other).i);
     },
     "<": function(env, other) {
-        return this.i < (IntegerClass.methods("new")(env, "new")(other).i);
+        return this.i < (IntegerClass.methods("new")(env, other).i);
     },
     ">=": function(env, other) {
-        return this.i >= (IntegerClass.methods("new")(env, "new")(other).i);
+        return this.i >= (IntegerClass.methods("new")(env, other).i);
     },
     "<=": function(env, other) {
         return this.i <= (IntegerClass.methods("new")(env, other).i);
@@ -514,7 +646,6 @@ BlockClass.public_imethods = {
         return _T(env, null);
     },
     "call": function(env, ...args) {
-        // console.log("A FUCKING BLOCK CALL", args)
         return this.block(env, ...args);
     }
 }
@@ -551,22 +682,26 @@ function _T(env, primitive) {
 }
 
 function ast_to_function(ast) {
-    return new Function("env", `    'use strict';
+    return new Function("env", `
+    'use strict';
     let tmpblock = null;
     let tmpblockres = null;
     ${compile(ast).replaceAll("\n", "\n    ")}`);
 }
 
 function compile(ast, pre_return="") {
+    console.log(ast);
     if (ast.type === "send") {
         let args = [];
         for (let arg of ast.children.slice(2)) {
             args.push(compile(arg));
         }
+        let name = JSON.stringify(String(ast.children[1]));
         if (ast.children[0] === null) {
-            return `env.rlocals[0][${JSON.stringify(String(ast.children[1]))}](env, ${args.join(', ')})`;
+            return `env.rlocals[0][${name}](env, ${args.join(', ')})`;
         }
-        return `${compile(ast.children[0])}.methods(${JSON.stringify(String(ast.children[1]))})(env, ${args.join(', ')})`;
+        let object_expr = compile(ast.children[0]);
+        return `${object_expr}.methods(${name})(env, ${args.join(', ')})`;
     
     } else if (ast.type == "begin") {
         let res = "(function() {\n    let res;\n";
@@ -587,16 +722,20 @@ function compile(ast, pre_return="") {
         return "_T(env, " + JSON.stringify(String(ast.children[0])) + ")";
     
     } else if (ast.type === "lvasgn") {
-        return `rset(env.rlocals[0], ${JSON.stringify(String(ast.children[0], pre_return))}, ${compile(ast.children[1], pre_return)})`;
+        let name = JSON.stringify(String(ast.children[0]));
+        let expr = compile(ast.children[1], pre_return);
+        return `rset(env.rlocals[0], ${name}, ${expr})`;
     
     } else if (ast.type === "lvar") {
-        return `env.rlocals[0][${JSON.stringify(String(ast.children[0], pre_return))}]()`;
+        let name = JSON.stringify(String(ast.children[0]));
+        return `env.rlocals[0][${name}]()`;
     
     } else if (ast.type === "while") {
         let block = compile(new RubyNode("begin", ast.children.slice(1)), pre_return).replaceAll("\n", "\n                ");
+        let condition = compile(ast.children[0], pre_return);
         return `(function() {
     let res;
-    while (${compile(ast.children[0], pre_return)}) {
+    while (${condition}) {
         res = (function() {
             ${block}
         })();
@@ -605,8 +744,31 @@ function compile(ast, pre_return="") {
 })()`;
     
     } else if (ast.type === "const") {
-        return `env.rconsts[${JSON.stringify(String(ast.children[1]))}]()`
-        
+        let name = JSON.stringify(String(ast.children[1]));
+        if (ast.children[0] === null) {
+            return `env.getconst(${name})(env)`
+        }
+        let objexpr = compile(ast.children[0], pre_return);
+        return `${objexpr}.consts[${name}](env)`
+    
+    } else if (ast.type === "ivasgn") {
+        let name = JSON.stringify(String(ast.children[0]).substr(1));
+        let expr = compile(ast.children[1], pre_return);
+        return `env.setivar(${name}, ${expr})`
+    
+    } else if (ast.type === "ivar") {
+        let name = JSON.stringify(String(ast.children[0]).substr(1));
+        return `env.getivar(${name})`
+    
+    } else if (ast.type === "casgn") {
+        let name = JSON.stringify(String(ast.children[1]));
+        let expr = compile(ast.children[2], pre_return);
+        if (ast.children[0] === null) {
+            return `env.setconst(${name}, ${expr})`
+        }
+        let objexpr = compile(ast.children[0], pre_return);
+        return `rset(${objexpr}.consts, ${name}, ${expr});`
+    
     } else if (ast.type === "if") {
         let block;
         let block_else;
@@ -620,9 +782,11 @@ function compile(ast, pre_return="") {
         } else {
             block_else = compile(ast.children[2], pre_return).replaceAll("\n", "\n            ");
         }
+        let condition = compile(ast.children[0], pre_return);
+        
         return `(function() {
     let res = null;
-    if (${compile(ast.children[0], pre_return)}) {
+    if (${condition}) {
         res = (function() {
             ${block}
         })();
@@ -636,41 +800,64 @@ function compile(ast, pre_return="") {
 })()`
         
     } else if (ast.type === "gvasgn") {
-        return `rset(env.rglobals, ${JSON.stringify(String(ast.children[0]).substr(1))}, ${compile(ast.children[1], pre_return)})`;
+        let name = JSON.stringify(String(ast.children[0]).substr(1));
+        let expr = compile(ast.children[1], pre_return);
+        return `env.rglobals[${name}] = ${expr}`;
     
     } else if (ast.type === "gvar") {
-        return `env.rglobals[${JSON.stringify(String(ast.children[0]).substr(1))}]()`;
+        let name = JSON.stringify(String(ast.children[0]).substr(1));
+        return `env.rglobals[${name}]`;
     
     } else if (ast.type === "int") {
         return "_T(env, " + JSON.stringify(Number(ast.children[0])) + ")";
         
     } else if (ast.type === "def") {
+        let name = ast.children[0];
+        
+        // Convert the function arguments into code
         let aast = ast.children[1];
         let argname_code = "";
         let argname_list = "";
+        let optarg_code = "";
         let blockarg_code = "";
         if (aast.children.length > 0) {
+            // TODO: procarg0 should fill missing args with nil but args shouldn't
             if (aast.children[0].type === "procarg0") {
                 aast = aast.children[0];
             }
             let name = ast.children[0];
             for (let node of aast.children) {
+                let argname = JSON.stringify(String(node.children[0]));
                 if (node.type === "arg") {
-                    argname_list += node.children[0] + ", ";
-                    argname_code += `rset(env.rlocals[0], ${JSON.stringify(String(node.children[0]))}, _T(env, ${node.children[0]}));\n  `
+                    argname_list += "__arg_" + node.children[0] + ", ";
+                    argname_code += `rset(env.rlocals[0], ${argname}, _T(env, __arg_${node.children[0]}));\n`;
                 } else if (node.type === "blockarg") {
-                    blockarg_code = `rset(env.rlocals[0], ${JSON.stringify(String(node.children[0]))}, env.block);\n  `
+                    blockarg_code = `rset(env.rlocals[0], ${argname}, env.block);\n`;
+                } else if (node.type === "optarg") {
+                    let optarg_value = compile(node.children[1], pre_return);
+                    argname_list += "__arg_" + node.children[0] + ", ";
+                    optarg_code += `rset(env.rlocals[0], ${argname}, ${optarg_value});
+if (__arg_${node.children[0]} !== undefined)
+    rset(env.rlocals[0], ${argname}, _T(env, __arg_${node.children[0]}));
+`;
                 } else {
-                    throw new NotImplementedError(`Unknown argument type "${node.type}"`)
+                    throw new NotImplementedError(`Unknown argument type "${node.type}"`);
                 }
             }
             argname_list = argname_list.substr(0, argname_list.length - 2);
         }
+        blockarg_code = blockarg_code.replaceAll("\n", "\n    ");
+        optarg_code = optarg_code.replaceAll("\n", "\n    ");
+        argname_code = argname_code.replaceAll("\n", "\n    ");
+        
+        let function_code = compile(ast.children[2], pre_return).replaceAll("\n", "\n    ");
+        
+        // console.log(env, bound_to, ${argname_list});
         return `env.rlocals[0][${JSON.stringify(String(name))}] = function(env, ${argname_list}) {
     let tmpblock = null;
     let tmpblockres = null;
     env.rlocals.stack_push({...(env.rlocals[0])});
-    ${blockarg_code.replaceAll("\n", "\n    ")}${argname_code.replaceAll("\n", "\n    ")}let b_retval = ${compile(ast.children[2], pre_return).replaceAll("\n", "\n    ")};
+    ${blockarg_code}${optarg_code}${argname_code}let b_retval = ${function_code};
     env.rlocals.stack_pop();
     return b_retval;
 }`;
@@ -691,26 +878,80 @@ function compile(ast, pre_return="") {
         for (let arg of ast.children[0].children.slice(2)) {
             args.push(compile(arg));
         }
+        let args_s = args.join(', ');
+        let name = JSON.stringify(String(ast.children[0].children[1]));
+        let code1 = compile(ast2, pre_return).replaceAll("\n", "\n        ");
         if (ast.children[0].children[0] === null) {
             return `(function() {
     let res;
-    env.block = BlockClass.methods("new")(env, ${compile(ast2, pre_return).replaceAll("\n", "\n    ")});
-    res = env.rlocals[0][${JSON.stringify(String(ast.children[0].children[1]))}](env, ${args.join(', ')});
+    env.block = BlockClass.methods("new")(env, ${code1});
+    res = env.rlocals[0][${name}](env, ${args_s});
     env.block = _T(env, null);
     return res;
 })()`;
         } else {
+            let code2 = compile(ast.children[0].children[0], pre_return).replaceAll("\n", "\n    ");
             return `(function() {
     let res;
-    rset(env.rlocals[0], "&", env.block = BlockClass.methods("new")(env, ${compile(ast2, pre_return).replaceAll("\n", "\n        ")}));
-    tmpblockres = ${compile(ast.children[0].children[0], pre_return).replaceAll("\n", "\n    ")};
+    rset(env.rlocals[0], "&", env.block = BlockClass.methods("new")(env, ${code1}));
+    tmpblockres = ${code2};
     env.block = env.rlocals[0]["&"]();
-    res = tmpblockres.methods(${JSON.stringify(String(ast.children[0].children[1]))})(env, ${args.join(', ')});
+    res = tmpblockres.methods(${name})(env, ${args_s});
     env.block = _T(env, null);
     return res;
 })()`;
         }
-        
+    
+    } else if (ast.type === "op_asgn") {
+        let getter;
+        if (ast.children[0].type === "lvasgn") {
+            getter = new RubyNode("send", [null, ast.children[0].children[0]]);
+        } else if (ast.children[0].type === "gvasgn") {
+            getter = new RubyNode("gvar", [ast.children[0].children[0]]);
+        } else if (ast.children[0].type === "ivasgn") {
+            getter = new RubyNode("ivar", [ast.children[0].children[0]]);
+        } else if (ast.children[0].type === "casgn") {
+            getter = new RubyNode("const", [ast.children[0].children[0], ast.children[0].children[1]]);
+        }
+        let ast2 = new RubyNode(ast.children[0].type, [
+            ...ast.children[0].children,
+            new RubyNode("send", [
+                getter,
+                ast.children[1],
+                ast.children[2]
+            ])
+        ]);
+        return compile(ast2, pre_return);
+    
+    } else if (ast.type === "class") {
+        // TODO: Implement private and protected
+        let objexpr = `(function() {
+    let tmpblock = null;
+    let tmpblockres = null;
+    env.rlocals.stack_push({...(env.rlocals[0])});
+    ${compile(ast.children[2])};
+    return env.rlocals.stack_pop();
+})`;
+        let const_obj = ast.children[0].children[0];
+        let const_name = JSON.stringify(String(ast.children[0].children[1]));
+        let inh_expr = "null";
+        if (ast.children[1] !== null) {
+            inh_expr = compile(ast.children[1]);
+        }
+        if (const_obj === null)
+            return `env.augment_class(
+    env.object_stack[env.object_stack.length - 1].consts,
+    ${const_name},
+    ${inh_expr},
+    ${objexpr.replaceAll('\n', '\n    ')}
+)`;
+        return `env.augment_class(
+    ${compile(const_obj, pre_return).replaceAll('\n', '\n    ')}.consts, 
+    ${const_name}, 
+    ${inh_expr},
+    ${objexpr}
+)`
+    
     } else if (ast.type === "return") {
         if (ast.children === null) {
             return `${pre_return}return`
@@ -722,198 +963,131 @@ function compile(ast, pre_return="") {
     throw new NotImplementedError(`AST node type "${ast.type}" not implemented`);
 }
 
-let ast = new RubyNode('lvasgn', [
-    'x',
-    new RubyNode('block', [
-        new RubyNode('send', [
-            new RubyNode('const', [
-                null,
-                'Array'
-            ]),
-            'new',
-            new RubyNode('int', [5])
+let ast = new RubyNode('begin', [
+    new RubyNode('class', [
+        new RubyNode('const', [
+            null,
+            'Range'
         ]),
-        new RubyNode('args'),
-        new RubyNode('int', [1])
-    ])
-])
-/* new RubyNode('begin', [
-    new RubyNode('def', [
-        'brange',
-        new RubyNode('args', [
-            new RubyNode('arg', ['start']),
-            new RubyNode('arg', ['rend']),
-            new RubyNode('arg', ['step']),
-            new RubyNode('blockarg', ['block'])
-        ]),
-        new RubyNode('block', [
-            new RubyNode('send', [
-                new RubyNode('begin', [new RubyNode('send', [
-                        new RubyNode('begin', [new RubyNode('send', [
-                                new RubyNode('lvar', ['rend']),
-                                '-',
-                                new RubyNode('lvar', ['start'])
-                            ])]),
-                        '/',
-                        new RubyNode('lvar', ['step'])
-                    ])]),
-                'times'
-            ]),
-            new RubyNode('args', [new RubyNode('procarg0', [new RubyNode('arg', ['i'])])]),
-            new RubyNode('send', [
-                new RubyNode('lvar', ['block']),
-                'call',
-                new RubyNode('send', [
-                    new RubyNode('send', [
-                        new RubyNode('lvar', ['i']),
-                        '*',
-                        new RubyNode('lvar', ['step'])
-                    ]),
-                    '+',
-                    new RubyNode('lvar', ['start'])
-                ])
-            ])
-        ])
-    ]),
-    new RubyNode('def', [
-        'range',
-        new RubyNode('args', [
-            new RubyNode('arg', ['start']),
-            new RubyNode('arg', ['rend']),
-            new RubyNode('arg', ['step'])
-        ]),
+        null,
         new RubyNode('begin', [
-            new RubyNode('lvasgn', [
-                'result',
-                new RubyNode('array')
-            ]),
-            new RubyNode('block', [
-                new RubyNode('send', [
-                    new RubyNode('begin', [new RubyNode('send', [
-                            new RubyNode('begin', [new RubyNode('send', [
-                                    new RubyNode('lvar', ['rend']),
-                                    '-',
-                                    new RubyNode('lvar', ['start'])
-                                ])]),
-                            '/',
-                            new RubyNode('lvar', ['step'])
-                        ])]),
-                    'times'
+            new RubyNode('def', [
+                'initialize',
+                new RubyNode('args', [
+                    new RubyNode('arg', ['start']),
+                    new RubyNode('arg', ['r_end']),
+                    new RubyNode('optarg', [
+                        'step',
+                        new RubyNode('int', [1])
+                    ])
                 ]),
-                new RubyNode('args', [new RubyNode('procarg0', [new RubyNode('arg', ['i'])])]),
-                new RubyNode('send', [
-                    new RubyNode('lvar', ['result']),
-                    '<<',
-                    new RubyNode('begin', [new RubyNode('send', [
+                new RubyNode('begin', [
+                    new RubyNode('ivasgn', [
+                        '@start',
+                        new RubyNode('lvar', ['start'])
+                    ]),
+                    new RubyNode('ivasgn', [
+                        '@r_end',
+                        new RubyNode('lvar', ['r_end'])
+                    ]),
+                    new RubyNode('ivasgn', [
+                        '@step',
+                        new RubyNode('lvar', ['step'])
+                    ])
+                ])
+            ]),
+            new RubyNode('def', [
+                '[]',
+                new RubyNode('args', [new RubyNode('arg', ['i'])]),
+                new RubyNode('begin', [
+                    new RubyNode('lvasgn', [
+                        'x',
+                        new RubyNode('send', [
+                            new RubyNode('ivar', ['@start']),
+                            '+',
                             new RubyNode('send', [
                                 new RubyNode('lvar', ['i']),
                                 '*',
-                                new RubyNode('lvar', ['step'])
+                                new RubyNode('ivar', ['@step'])
+                            ])
+                        ])
+                    ]),
+                    new RubyNode('if', [
+                        new RubyNode('send', [
+                            new RubyNode('lvar', ['x']),
+                            '<',
+                            new RubyNode('ivar', ['@r_end'])
+                        ]),
+                        new RubyNode('return', [new RubyNode('lvar', ['x'])]),
+                        null
+                    ]),
+                    new RubyNode('send', [
+                        null,
+                        'raise',
+                        new RubyNode('send', [
+                            new RubyNode('const', [
+                                null,
+                                'IndexError'
                             ]),
-                            '+',
-                            new RubyNode('lvar', ['start'])
-                        ])])
+                            'new',
+                            new RubyNode('str', ['Index out of range'])
+                        ])
+                    ])
                 ])
             ]),
-            new RubyNode('return', [new RubyNode('lvar', ['result'])])
+            new RubyNode('def', [
+                'each',
+                new RubyNode('args', [new RubyNode('blockarg', ['b'])]),
+                new RubyNode('begin', [
+                    new RubyNode('lvasgn', [
+                        'x',
+                        new RubyNode('ivar', ['@start'])
+                    ]),
+                    new RubyNode('while', [
+                        new RubyNode('send', [
+                            new RubyNode('lvar', ['x']),
+                            '<',
+                            new RubyNode('ivar', ['@r_end'])
+                        ]),
+                        new RubyNode('begin', [
+                            new RubyNode('send', [
+                                null,
+                                'puts',
+                                new RubyNode('str', ['inside'])
+                            ]),
+                            new RubyNode('send', [
+                                new RubyNode('lvar', ['b']),
+                                'call',
+                                new RubyNode('lvar', ['x'])
+                            ]),
+                            new RubyNode('op_asgn', [
+                                new RubyNode('lvasgn', ['x']),
+                                '+',
+                                new RubyNode('ivar', ['@step'])
+                            ])
+                        ])
+                    ])
+                ])
+            ])
         ])
-    ]),
-    new RubyNode('send', [
-        null,
-        'puts',
-        new RubyNode('str', [' ================= RANGE ================= '])
     ]),
     new RubyNode('lvasgn', [
-        'x',
+        'r',
         new RubyNode('send', [
-            null,
-            'range',
-            new RubyNode('int', [-100]),
-            new RubyNode('int', [100]),
-            new RubyNode('int', [3])
-        ])
-    ]),
-    new RubyNode('block', [
-        new RubyNode('send', [
-            new RubyNode('lvar', ['x']),
-            'each_with_index'
-        ]),
-        new RubyNode('args', [
-            new RubyNode('arg', ['n']),
-            new RubyNode('arg', ['i'])
-        ]),
-        new RubyNode('send', [
-            null,
-            'puts',
-            new RubyNode('send', [
-                new RubyNode('send', [
-                    new RubyNode('send', [
-                        new RubyNode('lvar', ['i']),
-                        'to_s'
-                    ]),
-                    '+',
-                    new RubyNode('str', [' '])
-                ]),
-                '+',
-                new RubyNode('send', [
-                    new RubyNode('lvar', ['n']),
-                    'to_s'
-                ])
-            ])
-        ])
-    ]),
-    new RubyNode('send', [
-        null,
-        'puts',
-        new RubyNode('str', [' ================= RANGE direct ================= '])
-    ]),
-    new RubyNode('block', [
-        new RubyNode('send', [
-            new RubyNode('send', [
+            new RubyNode('const', [
                 null,
-                'range',
-                new RubyNode('int', [-100]),
-                new RubyNode('int', [100]),
-                new RubyNode('int', [3])
+                'Range'
             ]),
-            'each_with_index'
-        ]),
-        new RubyNode('args', [
-            new RubyNode('arg', ['n']),
-            new RubyNode('arg', ['i'])
-        ]),
-        new RubyNode('send', [
-            null,
-            'puts',
-            new RubyNode('send', [
-                new RubyNode('send', [
-                    new RubyNode('send', [
-                        new RubyNode('lvar', ['i']),
-                        'to_s'
-                    ]),
-                    '+',
-                    new RubyNode('str', [' '])
-                ]),
-                '+',
-                new RubyNode('send', [
-                    new RubyNode('lvar', ['n']),
-                    'to_s'
-                ])
-            ])
-        ])
-    ]),
-    new RubyNode('send', [
-        null,
-        'puts',
-        new RubyNode('str', [' ================= BRANGE ================= '])
-    ]),
-    new RubyNode('block', [
-        new RubyNode('send', [
-            null,
-            'brange',
+            'new',
             new RubyNode('int', [-100]),
             new RubyNode('int', [100]),
             new RubyNode('int', [3])
+        ])
+    ]),
+    new RubyNode('block', [
+        new RubyNode('send', [
+            new RubyNode('lvar', ['r']),
+            'each'
         ]),
         new RubyNode('args', [new RubyNode('procarg0', [new RubyNode('arg', ['n'])])]),
         new RubyNode('send', [
@@ -922,7 +1096,7 @@ let ast = new RubyNode('lvasgn', [
             new RubyNode('lvar', ['n'])
         ])
     ])
-]); */
+]);
 
 let locals = [{
     gets: function(env) { 
@@ -935,18 +1109,37 @@ let locals = [{
         }
     }
 }];
-let consts = {
-    STDOUT: function() {
-        return {
-            methods: {
-                gets: function(env) { 
-                    return StringObject.methods("new")(env, prompt("gets"));
-                },
-                puts: function(env, ...args) {
-                    for (let arg of args) {
-                        console.log(arg.methods("to_s")(env).s);
-                    }
+let globals = {
+    stdout: {
+        methods: {
+            gets: function(env) { 
+                return StringObject.methods("new")(env, prompt("gets"));
+            },
+            puts: function(env, ...args) {
+                for (let arg of args) {
+                    console.log(arg.methods("to_s")(env).s);
                 }
+            }
+        }
+    }
+};
+
+let env = new RubyEnviroment(locals, globals, null);
+env.push_empty_object();
+env.object_stack[0].consts = {
+    STDOUT: function(env) {
+        return {
+            methods: function(name) {
+                return ({
+                    gets: function(env) { 
+                        return StringObject.methods("new")(env, prompt("gets"));
+                    },
+                    puts: function(env, ...args) {
+                        for (let arg of args) {
+                            console.log(arg.methods("to_s")(env).s);
+                        }
+                    }
+                })[name];
             }
         }
     },
@@ -957,24 +1150,6 @@ let consts = {
     BasicObject: function() { return BaseClass },
     // TODO: Class
 };
-let globals = {
-    stdout: function() {
-        return {
-            methods: {
-                gets: function(env) { 
-                    return StringObject.methods("new")(env, prompt("gets"));
-                },
-                puts: function(env, ...args) {
-                    for (let arg of args) {
-                        console.log(arg.methods("to_s")(env).s);
-                    }
-                }
-            }
-        }
-    }
-};
-
-let env = new RubyEnviroment(locals, consts, globals, null);
 console.log(compile(ast));
 var f = ast_to_function(ast);
 f(env);
