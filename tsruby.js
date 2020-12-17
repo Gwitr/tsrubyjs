@@ -15,6 +15,15 @@ class NotImplementedError extends Error {
     }
 }
 
+class NextTrigger extends Error {
+    constructor(return_value) {
+        super();
+        this.name = "Ruby runtime error";
+        this.message = "next used outside of block";
+        this.return_value = return_value;
+    }
+}
+
 Array.prototype.stack_push = function(value) {
     this.unshift(value);
 }
@@ -646,7 +655,14 @@ BlockClass.public_imethods = {
         return _T(env, null);
     },
     "call": function(env, ...args) {
-        return this.block(env, ...args);
+        try {
+            return this.block(env, ...args);
+        } catch (e) {
+            if (!(e instanceof NextTrigger))
+                throw e;
+            
+            return e.return_value;
+        }
     }
 }
 
@@ -690,7 +706,7 @@ function ast_to_function(ast) {
 }
 
 function compile(ast, pre_return="") {
-    console.log(ast);
+    // console.log(ast);
     if (ast.type === "send") {
         let args = [];
         for (let arg of ast.children.slice(2)) {
@@ -923,6 +939,12 @@ if (__arg_${node.children[0]} !== undefined)
         ]);
         return compile(ast2, pre_return);
     
+    } else if (ast.type === "next") {
+        if (ast.children.length > 0) {
+            throw new NotImplementedError("next with args not implemented yet");
+        }
+        return 'throw new NextTrigger(_T(env, null));';
+    
     } else if (ast.type === "class") {
         // TODO: Implement private and protected
         let objexpr = `(function() {
@@ -1051,11 +1073,6 @@ let ast = new RubyNode('begin', [
                         ]),
                         new RubyNode('begin', [
                             new RubyNode('send', [
-                                null,
-                                'puts',
-                                new RubyNode('str', ['inside'])
-                            ]),
-                            new RubyNode('send', [
                                 new RubyNode('lvar', ['b']),
                                 'call',
                                 new RubyNode('lvar', ['x'])
@@ -1090,10 +1107,30 @@ let ast = new RubyNode('begin', [
             'each'
         ]),
         new RubyNode('args', [new RubyNode('procarg0', [new RubyNode('arg', ['n'])])]),
-        new RubyNode('send', [
-            null,
-            'puts',
-            new RubyNode('lvar', ['n'])
+        new RubyNode('begin', [
+            new RubyNode('if', [
+                new RubyNode('send', [
+                    new RubyNode('lvar', ['n']),
+                    '<',
+                    new RubyNode('int', [-40])
+                ]),
+                new RubyNode('next'),
+                null
+            ]),
+            new RubyNode('if', [
+                new RubyNode('send', [
+                    new RubyNode('lvar', ['n']),
+                    '>',
+                    new RubyNode('int', [40])
+                ]),
+                new RubyNode('next'),
+                null
+            ]),
+            new RubyNode('send', [
+                null,
+                'puts',
+                new RubyNode('lvar', ['n'])
+            ])
         ])
     ])
 ]);
