@@ -123,11 +123,12 @@ export class RubyEnviroment {
                 continue;
             let obj_getter = class_locals[obj_getter_name];
 
-            // FIXME: Don't add local variables into the class' instance methods [!!!]
             if (!rclass.public_methods.hasOwnProperty(obj_getter)) {
                 if (!rclass.private_methods.hasOwnProperty(obj_getter)) {
                     if (!rclass.protected_methods.hasOwnProperty(obj_getter)) {
-                        rclass.public_imethods[obj_getter_name] = obj_getter;
+                        if (obj_getter.defined_in_ruby !== undefined) {
+                            rclass.public_imethods[obj_getter_name] = obj_getter;
+                        }
                     }
                 }
             }
@@ -153,8 +154,8 @@ export function ast_to_function(ast) {
     ${compile(ast).replaceAll("\n", "\n    ")}`);
 }
 
+// TODO: Add some sort of compiler state object to remove all the redundant anonymous functions in the output
 export function compile(ast, pre_return="") {
-    // console.log(ast);
     if (ast.type === "send") {
         let args = [];
         for (let arg of ast.children.slice(2)) {
@@ -314,17 +315,21 @@ if (__arg_${node.children[0]} !== undefined)
         optarg_code = optarg_code.replaceAll("\n", "\n    ");
         argname_code = argname_code.replaceAll("\n", "\n    ");
 
-        let function_code = compile(ast.children[2], pre_return).replaceAll("\n", "\n    ");
+        let function_code = compile(ast.children[2], pre_return).replaceAll("\n", "\n        ");
 
         // console.log(env, bound_to, ${argname_list});
-        return `env.rlocals[0][${JSON.stringify(String(name))}] = function(env, ${argname_list}) {
-    let tmpblock = null;
-    let tmpblockres = null;
-    env.rlocals.stack_push({...(env.rlocals[0])});
-    ${blockarg_code}${optarg_code}${argname_code}let b_retval = ${function_code};
-    env.rlocals.stack_pop();
-    return b_retval;
-}`;
+        return `(function() {
+    env.rlocals[0][${JSON.stringify(String(name))}] = function(env, ${argname_list}) {
+        let tmpblock = null;
+        let tmpblockres = null;
+        env.rlocals.stack_push({...(env.rlocals[0])});
+        ${blockarg_code}${optarg_code}${argname_code}let b_retval = ${function_code};
+        env.rlocals.stack_pop();
+        return b_retval;
+    };
+    env.rlocals[0][${JSON.stringify(String(name))}].defined_in_ruby = true;
+    return env.rlocals[0][${JSON.stringify(String(name))}];
+})()`;
 
     } else if (ast.type === "array") {
         if (ast.children === undefined) {
