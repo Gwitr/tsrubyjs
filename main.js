@@ -1,16 +1,21 @@
 import * as tsr from './tsruby.js';
 import { ast } from './ast.js'
 
+let output = null;
 
 let locals = [{
     gets: function(env) {
         return StringObject.methods("new")(env, prompt("gets"));
     },
     puts: function(env, ...args) {
-        // console.trace();
-        for (let arg of args) {
-            console.log(arg.methods("to_s")(env).s);
+        if (output === null) {
+            output = document.getElementById("output");
         }
+        let s = "";
+        for (let arg of args) {
+            s += arg.methods("to_s")(env).s + "\n";
+        }
+        output.value = output.value + s;
     }
 }];
 let globals = {
@@ -20,9 +25,14 @@ let globals = {
                 return StringObject.methods("new")(env, prompt("gets"));
             },
             puts: function(env, ...args) {
-                for (let arg of args) {
-                    console.log(arg.methods("to_s")(env).s);
+                if (output === null) {
+                    output = document.getElementById("output");
                 }
+                let s = "";
+                for (let arg of args) {
+                    s += arg.methods("to_s")(env).s + "\n";
+                }
+                output.value = output.value + s;
             }
         }
     }
@@ -39,9 +49,14 @@ env.object_stack[0].consts = {
                         return StringObject.methods("new")(env, prompt("gets"));
                     },
                     puts: function(env, ...args) {
-                        for (let arg of args) {
-                            console.log(arg.methods("to_s")(env).s);
+                        if (output === null) {
+                            output = document.getElementById("output");
                         }
+                        let s = "";
+                        for (let arg of args) {
+                            s += arg.methods("to_s")(env).s + "\n";
+                        }
+                        output.value = output.value + s;
                     }
                 })[name];
             }

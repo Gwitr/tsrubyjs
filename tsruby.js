@@ -33,14 +33,22 @@ export class RubyEnviroment {
         this.block = block;
         this.object_stack = [];
         this.nil_singleton = classes.NilClass.methods("new")(this);
+        
+        this.INTEGER_CACHE = [];
+
+        for (let i = classes.INTEGER_CACHE_MIN; i <= classes.INTEGER_CACHE_MAX; i++) {
+            let rint = classes.IntegerClass.methods("new")(this, i);
+            this.INTEGER_CACHE.push(rint);
+        }
     }
 
     _T(env, primitive) {
+        // console.log(primitive);
         if (typeof primitive === "string") {
             return classes.StringClass.methods("new")(env, primitive);
 
         } else if (typeof primitive === "number") {
-            return classes.IntegerClass.methods("new")(env, primitive);
+            return classes.int_js2ruby(env, primitive);
 
         } else if (primitive === null) {
             return env.nil_singleton;
@@ -95,12 +103,11 @@ export class RubyEnviroment {
     }
 
     getivar(name) {
-        for (let i = this.object_stack.length - 1; i >= 0; i--) {
-            let ivar = this.object_stack[i].ivars[name];
-            if (ivar !== undefined)
-                return ivar;
+        let ivars = this.object_stack[this.object_stack.length - 1].ivars;
+        if (!ivars.hasOwnProperty(name)) {
+            return this._T(this, null);
         }
-        return this._T(this, null);
+        return ivars[name];
     }
 
     setivar(name, value) {
@@ -113,7 +120,7 @@ export class RubyEnviroment {
             base = BaseClass;
         }
         if (container.hasOwnProperty(name)) {
-            this.object_stack.push(container[name]);
+            this.object_stack.push(container[name](env));
         } else {
             this.object_stack.push(base.subclass(name));
         }
@@ -124,8 +131,7 @@ export class RubyEnviroment {
                 continue;
             let obj_getter = class_locals[obj_getter_name];
 
-            // FIXME!
-            if (!rclass.has_method(obj_getter)) {
+            if (!rclass.has_method(obj_getter_name)) {
                 if (obj_getter.defined_in_ruby !== undefined) {
                     rclass.public_imethods[obj_getter_name] = obj_getter;
                 }
@@ -142,7 +148,6 @@ export class RubyEnviroment {
     throw_next(value) {
         throw new exc.NextTrigger(value);
     }
-
 }
 
 export function ast_to_function(ast) {
