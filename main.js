@@ -1,6 +1,7 @@
 import * as tsr from './tsruby.js';
 import { ast } from './ast.js'
 
+
 let locals = [{
     gets: function(env) {
         return StringObject.methods("new")(env, prompt("gets"));
@@ -53,7 +54,7 @@ env.object_stack[0].consts = {
     BasicObject: function() { return tsr.BaseClass },
     // TODO: Class
 };
-
+window.env = env;
 console.log(tsr.compile(ast));
 var f = tsr.ast_to_function(ast);
 f(env);
