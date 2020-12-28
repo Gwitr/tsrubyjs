@@ -1,5 +1,10 @@
 import * as tsr from './tsruby.js';
-import { ast } from './ast.js'
+import { ast } from './ast.js';
+import * as classes from './lib/classes.js';
+
+import { BaseClass } from './lib/object.js';
+import * as exc from './lib/errors.js';
+import * as modules from './lib/modules.js';
 
 let output = null;
 
@@ -16,6 +21,7 @@ let locals = [{
             s += arg.methods("to_s")(env).s + "\n";
         }
         output.value = output.value + s;
+        output.scrollTop = output.scrollHeight;
     }
 }];
 let globals = {
@@ -33,6 +39,7 @@ let globals = {
                     s += arg.methods("to_s")(env).s + "\n";
                 }
                 output.value = output.value + s;
+                output.scrollTop = output.scrollHeight;
             }
         }
     }
@@ -57,6 +64,7 @@ env.object_stack[0].consts = {
                             s += arg.methods("to_s")(env).s + "\n";
                         }
                         output.value = output.value + s;
+                        output.scrollTop = output.scrollHeight;
                     }
                 })[name];
             }
@@ -67,8 +75,61 @@ env.object_stack[0].consts = {
     Integer: function() { return tsr.IntegerClass },
     Object: function() { return tsr.ObjectClass },
     BasicObject: function() { return tsr.BaseClass },
+    
+    Time: function() {
+        return {
+            methods: function(name) {
+                return ({
+                    now: function(env) { return classes.FloatClass.methods("new")(env, Date.now() / 1000) }
+                })[name];
+            }
+        }
+    }
     // TODO: Class
 };
+
+//// Begin test code
+
+let A = BaseClass.subclass("A");
+A.extend(modules.kernel);
+A.public_methods = {
+    "test": function() {
+        try {
+            this.methods("_halt")(env);
+            console.log("A: Method lookup not working properly (fell through)");
+        } catch (e) {
+            if (e.message == "halted") {
+                console.log("A: Method lookup working properly");
+                return;
+            }
+            throw e;
+        }
+    }
+};
+
+let B = BaseClass.subclass("B");
+B.include(modules.kernel);
+B.public_imethods = {
+    "test": function() {
+        try {
+            this.methods("_halt")(env);
+            console.log("B: Method lookup not working properly (fell through)");
+        } catch (e) {
+            if (e.message == "halted") {
+                console.log("A: Method lookup working properly");
+                return;
+            }
+            throw e;
+        }
+    }
+};
+
+A.methods("test")(env);
+let B_instance = B.methods("new")(env);
+B_instance.methods("test")(env);
+
+//// End test code
+
 window.env = env;
 console.log(tsr.compile(ast));
 var f = tsr.ast_to_function(ast);

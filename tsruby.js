@@ -101,7 +101,18 @@ export class RubyEnviroment {
         else
             consts[name] = function(env) { return value };
     }
-
+    
+    sendlvar(name, ...args) {
+        if (this.rlocals[0].hasOwnProperty(name)) {
+            return this.rlocals[0][name](this, ...args);
+        }
+        try {
+            return this.object_stack[this.object_stack.length - 1].methods(name)(this, ...args);
+        } catch (e) {
+            throw new exc.RubyNameError('undefined local variable or method `' + name + "' for " + this.object_stack[this.object_stack.length - 1].name + ":Object");
+        }
+    }
+    
     getivar(name) {
         let ivars = this.object_stack[this.object_stack.length - 1].ivars;
         if (!ivars.hasOwnProperty(name)) {
@@ -150,12 +161,17 @@ export class RubyEnviroment {
     }
 }
 
-export function ast_to_function(ast) {
-    return new Function("env", `
+var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+export function ast_to_function(ast, make_async=false) {
+    let code = `
     'use strict';
     let tmpblock = null;
     let tmpblockres = null;
-    ${compile(ast).replaceAll("\n", "\n    ")}`);
+    ${compile(ast).replaceAll("\n", "\n    ")}`;
+    if (make_async) {
+        return new AsyncFunction("env", code);
+    }
+    return new Function("env", code);
 }
 
 let tab = {
@@ -166,7 +182,7 @@ let tab = {
         }
         let name = JSON.stringify(String(ast.children[1]));
         if (ast.children[0] === null) {
-            return `env.rlocals[0][${name}](env, ${args.join(', ')})`;
+            return `env.sendlvar(${name}, ${args.join(', ')})`;
         }
         let object_expr = compile(ast.children[0]);
         return `${object_expr}.methods(${name})(env, ${args.join(', ')})`;
@@ -377,13 +393,20 @@ if (__arg_${node.children[0]} !== undefined)
         let getter;
         if (ast.children[0].type === "lvasgn") {
             getter = new RubyNode("send", [null, ast.children[0].children[0]]);
+        
         } else if (ast.children[0].type === "gvasgn") {
             getter = new RubyNode("gvar", [ast.children[0].children[0]]);
+        
         } else if (ast.children[0].type === "ivasgn") {
             getter = new RubyNode("ivar", [ast.children[0].children[0]]);
+        
         } else if (ast.children[0].type === "casgn") {
             getter = new RubyNode("const", [ast.children[0].children[0], ast.children[0].children[1]]);
+        
+        } else if (ast.children[0].type === "send") {
+            getter = new RubyNode("send", [ast.children[0].children[0], ast.children[0].children[1]]);
         }
+        
         let ast2 = new RubyNode(ast.children[0].type, [
             ...ast.children[0].children,
             new RubyNode("send", [
@@ -434,13 +457,37 @@ if (__arg_${node.children[0]} !== undefined)
             return `return`
         }
         return `return ${compile(ast.children[0])}`;
+    },
+    sym: function(ast) {
+        return `env.getconst("Symbol")(env).methods("new")(env, ${JSON.stringify(ast.children[0])})`;
+    },
+    nil: function(ast) {
+        return 'env.nil_singleton';
+    },
+    "false": function(ast) {
+        return 'false';
+    },
+    "true": function(ast) {
+        return 'true';
+    },
+    hash: function(ast) {
+        if (ast.children.length > 0) {
+            throw new NotImplementedError("hash node with more than 0 children");
+        }
+        return `env.getconst("Hash")(env).methods("new")(env, 0)`;
     }
 };
 
 // TODO: Add some sort of compiler state object to remove all the redundant anonymous functions in the output
 export function compile(ast) {
     if (!tab.hasOwnProperty(ast.type)) {
+        console.log(ast);
         throw new exc.NotImplementedError(`AST node type "${ast.type}" not implemented`);
     }
-    return tab[ast.type](ast);
+    try {
+        return tab[ast.type](ast);
+    } catch (e) {
+        console.log(ast);
+        throw e;
+    }
 }
