@@ -47,46 +47,15 @@ let globals = {
 
 let env = new tsr.RubyEnviroment(locals, globals, null);
 env.push_empty_object();
-env.object_stack[0].consts = {
-    STDOUT: function(env) {
-        return {
-            methods: function(name) {
-                return ({
-                    gets: function(env) {
-                        return StringObject.methods("new")(env, prompt("gets"));
-                    },
-                    puts: function(env, ...args) {
-                        if (output === null) {
-                            output = document.getElementById("output");
-                        }
-                        let s = "";
-                        for (let arg of args) {
-                            s += arg.methods("to_s")(env).s + "\n";
-                        }
-                        output.value = output.value + s;
-                        output.scrollTop = output.scrollHeight;
-                    }
-                })[name];
-            }
-        }
-    },
-    Array: function() { return tsr.ArrayClass },
-    String: function() { return tsr.StringClass },
-    Integer: function() { return tsr.IntegerClass },
-    Object: function() { return tsr.ObjectClass },
-    BasicObject: function() { return tsr.BaseClass },
-    
-    Time: function() {
-        return {
-            methods: function(name) {
-                return ({
-                    now: function(env) { return classes.FloatClass.methods("new")(env, Date.now() / 1000) }
-                })[name];
-            }
-        }
+env.load_default_constants();
+env.load_default_globals();
+env.rlocals[0] = {
+    ...env.rlocals[0],
+    puts: function(...args) { 
+        console.log(args);
+        return env.object_stack[0].consts.STDOUT(env).methods("puts")(...args); 
     }
-    // TODO: Class
-};
+}
 
 //// Begin test code
 
@@ -116,7 +85,23 @@ B.public_imethods = {
             console.log("B: Method lookup not working properly (fell through)");
         } catch (e) {
             if (e.message == "halted") {
-                console.log("A: Method lookup working properly");
+                console.log("B: Method lookup working properly");
+                return;
+            }
+            throw e;
+        }
+    }
+};
+
+let C = B.subclass("C");
+C.public_imethods = {
+    "test2": function() {
+        try {
+            this.methods("_halt")(env);
+            console.log("C: Method lookup not working properly (fell through)");
+        } catch (e) {
+            if (e.message == "halted") {
+                console.log("C: Method lookup working properly");
                 return;
             }
             throw e;
@@ -127,6 +112,8 @@ B.public_imethods = {
 A.methods("test")(env);
 let B_instance = B.methods("new")(env);
 B_instance.methods("test")(env);
+let C_instance = C.methods("new")(env);
+C_instance.methods("test2")(env);
 
 //// End test code
 
